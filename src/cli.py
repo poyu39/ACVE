@@ -5,6 +5,7 @@ import os
 from acve import ACVE
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f'Using {device} device')
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Anime Character Voice Extractor')
@@ -14,8 +15,9 @@ if __name__ == '__main__':
     videos = None
     input_path = os.path.abspath(f'./../input/{args.input}')
     
-    videos = [os.path.join(input_path, video) for video in os.listdir(input_path)]
+    videos = [os.path.join(video) for video in os.listdir(input_path)]
     
     acve = ACVE(args.input)
     for video in videos:
-        acve.video2audio(video)
+        audio = acve.video2audio(video)
+        acve.separate(audio)
