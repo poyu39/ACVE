@@ -124,3 +124,5 @@ dmypy.json
 .pyre/
 
 src/config.yaml
+input/
+output/
