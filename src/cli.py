@@ -20,4 +20,6 @@ if __name__ == '__main__':
     acve = ACVE(args.input)
     for video in videos:
         audio = acve.video2audio(video)
-        acve.separate(audio)
+        output_path = acve.separate(audio)
+        rttm = acve.speaker_diarization(f'{output_path}/vocals.wav')
+        acve.extract_speaker_audio(f'{output_path}/vocals.wav', rttm)
