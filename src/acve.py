@@ -40,11 +40,12 @@ class ACVE:
         audio_clip.close()
         return audio_path
     
-    def separate(self, audio) -> None:
-        demucs.separate.main(shlex.split(f'-n mdx_extra --two-stems vocals --segment 8 -o {self.output_path} {audio}'))
-    
-    def get_speakers_list(self, audio_path: str) -> list:
-        return self.model.get_labels({"uri": audio_path})
-    
-    def extract(self, audio_path: str) -> dict:
-        return self.model({"uri": audio_path})
+    def separate(self, audio_path: str) -> None:
+        output_path = f"{self.output_path}/mdx_extra/{audio_path.split('/')[-1].split('.')[0]}/"
+        if os.path.exists(output_path):
+            print(f'{audio_path} already separated')
+            return
+        print(f'Separating {audio_path}')
+        demucs.separate.main(
+            shlex.split(f'-n mdx_extra --two-stems vocals --segment 8 -o {self.output_path} {audio_path}')
+        )
