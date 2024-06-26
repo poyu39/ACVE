@@ -1,14 +1,17 @@
 import os
 import shlex
 import soundfile as sf
+import shutil
 
 from moviepy.editor import VideoFileClip
-import torch
 import demucs.separate
-from pyannote.audio import Pipeline
+import numpy as np
+from scipy.spatial.distance import cdist
+from pyannote.audio import Model, Inference
 from pyannote.audio.pipelines.utils.hook import ProgressHook
 
 from config import CONFIG
+from util import time_to_seconds, seconds_to_time
 
 
 class ACVE:
@@ -16,11 +19,8 @@ class ACVE:
         '''
             Anime Character Voice Extractor
         '''
-        self.pipeline = Pipeline.from_pretrained(
-            'pyannote/speaker-diarization-3.1',
-            use_auth_token=CONFIG.HUGGINGFACE_ACCESS_TOKEN,
-        )
-        self.pipeline.to(torch.device('cuda'))
+        self.embedding_model = Model.from_pretrained('pyannote/embedding', use_auth_token=CONFIG.HUGGINGFACE_ACCESS_TOKEN)
+        self.embedding_inference = Inference(self.embedding_model, window="whole")
         
         # 資料路徑
         self.input_path = f'./../input/{anime_name}'
@@ -72,31 +72,77 @@ class ACVE:
             diarization.write_rttm(rttm)
         return rttm_path
 
-    def split_audio(self, audio_path: str, start: float, duration: float, save_path) -> None:
+    def split_audio(self, audio_path: str, start: float, end: float, save_path) -> None:
         audio, sr = sf.read(audio_path)
         start_frame = int(start * sr)
-        end_frame = int((start + duration) * sr)
+        end_frame = int(end * sr)
         sf.write(save_path, audio[start_frame:end_frame], sr)
     
-    def extract_speaker_audio(self, audio_path: str, rttm_path: str, min_duration = 1) -> None:
+    def split_audio_by_dialogue(self, audio_path: str, dialogues: list) -> str:
         audio_name = f"{audio_path.split('/')[-2]}_{audio_path.split('/')[-1].split('.')[0]}"
-        print(f'Extracting speaker audio from {audio_name}')
-        with open(rttm_path, 'r') as rttm:
-            now_progress = 0
-            rttm_lines = rttm.readlines()
-            rttm_len = len(rttm_lines)
-        for line in rttm_lines:
-            _, _, _, start, duration, _, _, speaker, _, _ = line.split()
-            if float(duration) < min_duration:
-                print(f'skip {speaker}/{start}__{duration} too short')
-                continue
-            start, duration = float(start), float(duration)
-            start_min = f'{int(float(start) // 60)}_{int(float(start) % 60)}' # 轉換成分鐘:秒
-            end_min = f'{int((float(start) + float(duration)) // 60)}_{int((float(start) + float(duration)) % 60)}' # 轉換成分鐘:秒
-            speaker_path = f'{self.output_path}/speaker_audio/{audio_name}/{speaker}'
-            if not os.path.exists(speaker_path):
-                os.makedirs(speaker_path, exist_ok=True)
-            self.split_audio(audio_path, start, duration,
-                            f'{self.output_path}/speaker_audio/{audio_name}/{speaker}/{start_min}__{end_min}.wav')
-            print(f'save {speaker}/{start_min}__{end_min}.wav {now_progress}/{rttm_len}')
+        output_path = f'{self.output_path}/dialogue_audio/{audio_name}'
+        if not os.path.exists(output_path):
+            os.makedirs(output_path, exist_ok=True)
+        else:
+            print(f'{output_path} already exists')
+            return output_path
+        now_progress = 1
+        for dialogue in dialogues:
+            print(f"Splitting {now_progress}/{len(dialogues)} \t {dialogue['start']} ~ {dialogue['end']} \t {dialogue['text']}")
+            start: str = dialogue['start']
+            end: str = dialogue['end']
+            start_seconds = int(time_to_seconds(start)) # 無條件捨去
+            end_seconds = int(time_to_seconds(end) + 0.5) # 無條件進位
+            output_file_name = f"{output_path}/{seconds_to_time(start_seconds).replace(':', '_')}__{seconds_to_time(end_seconds).replace(':', '_')}"
+            self.split_audio(audio_path, start_seconds, end_seconds, f'{output_file_name}.wav')
+            with open(f'{output_file_name}.lab', 'w', encoding='utf-8') as lab_file:
+                lab_file.write(dialogue['text'])
             now_progress += 1
+        return output_path
+    
+    def speaker_diarization(self, audio_path: str, distance_limit: float, test) -> None:
+        audio_name = f"{audio_path.split('/')[-2]}_{audio_path.split('/')[-1].split('.')[0]}"
+        embeddings = []
+        for audio in os.listdir(audio_path):
+            if audio.split('.')[1] == 'wav':
+                print(f'Embedding {audio}')
+                embeddings.append((audio, self.embedding_inference(f'{audio_path}/{audio}')))
+        distances = []
+        for i, (audio, embedding) in enumerate(embeddings):
+            distances.append([])
+            for target_audio, target_embedding in embeddings:
+                if audio == target_audio:
+                    continue
+                distance = cdist(np.reshape(embedding, (1, -1)), np.reshape(target_embedding, (1, -1)), metric='cosine')[0, 0]
+                distances[i].append((target_audio, distance))
+        speakers = []
+        is_classified = [False] * len(embeddings)
+        for i, (audio, embedding) in enumerate(embeddings):
+            if is_classified[i]:
+                continue
+            speakers.append([])
+            speakers[-1].append(audio)
+            for j, distance in enumerate(distances[i]):
+                if is_classified[j]:
+                    continue
+                if distance[1] < distance_limit:
+                    # print(f'{audio} and {distance[0]} are the same speaker')
+                    speakers[-1].append(distance[0])
+                    is_classified[j] = True
+        total_audio = 0
+        for i, audio in enumerate(speakers):
+            total_audio += len(audio)
+            print(f'Speaker {i} has {len(audio)} audio')
+        print(f'Total {total_audio} audio')
+        if test:
+            return
+        for i, speaker in enumerate(speakers):
+            speaker_audio_path = f'{self.output_path}/speaker_audio/{audio_name}/{i}'
+            if not os.path.exists(speaker_audio_path):
+                os.makedirs(speaker_audio_path, exist_ok=True)
+            else:
+                print(f'{speaker_audio_path} already exists')
+                continue
+            for audio in speaker:
+                shutil.copy(f'{audio_path}/{audio}', f'{speaker_audio_path}/{audio}')
+        print(f'Speaker diarization of {audio_name} is done')
